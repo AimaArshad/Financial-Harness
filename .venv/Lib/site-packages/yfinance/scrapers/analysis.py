@@ -1,0 +1,251 @@
+from yfinance._http import HTTPError
+import pandas as pd
+
+from yfinance import utils
+from yfinance.config import YfConfig
+from yfinance.const import quote_summary_valid_modules
+from yfinance.data import YfData
+from yfinance.exceptions import YFException
+from yfinance.scrapers.quote import _QUOTE_SUMMARY_URL_
+
+# Yahoo serves GAAP and Normalized (non-GAAP) EPS data through quoteSummary
+# module-name suffixes, e.g. 'earningsTrendGaap' & 'earningsTrendNonGaap'.
+# None = module without suffix = Yahoo's default methodology for that ticker.
+_EPS_METHODOLOGY_MODULE_SUFFIX = {None: '', 'gaap': 'Gaap', 'normalized': 'NonGaap'}
+
+
+def _validate_eps_methodology(methodology):
+    if isinstance(methodology, str):
+        methodology = methodology.lower()
+    if methodology not in _EPS_METHODOLOGY_MODULE_SUFFIX:
+        raise ValueError(f"methodology must be None, 'gaap' or 'normalized', not {methodology!r}")
+    return methodology
+
+
+def _eps_methodology_label(methodology, module_data):
+    # Requested methodology, else the one Yahoo says it returned
+    if methodology is not None:
+        return methodology
+    default = module_data.get('defaultMethodology')
+    return {'gaap': 'gaap', 'nongaap': 'normalized'}.get(default, default)
+
+
+class Analysis:
+
+    def __init__(self, data: YfData, symbol: str):
+        self._data = data
+        self._symbol = symbol
+
+        # In quoteSummary the 'earningsTrend' module contains most of the data below.
+        # The format of data is not optimal so each function will process it's part of the data.
+        # This variable works as a cache, keyed by EPS methodology.
+        self._earnings_trend = {}
+
+        self._analyst_price_targets = None
+        self._earnings_estimate = {}
+        self._revenue_estimate = None
+        self._earnings_history = {}
+        self._eps_trend = {}
+        self._eps_revisions = {}
+        self._growth_estimates = None
+
+    def _get_periodic_df(self, key, currency_key=None, methodology=None, add_methodology=False) -> pd.DataFrame:
+        earnings_trend = self._fetch_earnings_trend(methodology)
+
+        data = []
+        currency = None
+        for item in earnings_trend.get('trend', [])[:4]:
+            row = {'period': item['period']}
+            for k, v in item[key].items():
+                if not isinstance(v, dict) or len(v) == 0:
+                    continue
+                row[k] = v['raw']
+            data.append(row)
+            if currency is None and currency_key is not None:
+                currency = item[key].get(currency_key)
+        if len(data) == 0:
+            return pd.DataFrame()
+        df = pd.DataFrame(data).set_index('period')
+        has_data = len(df.columns) > 0
+        if currency is not None:
+            df['currency'] = currency
+        if add_methodology and has_data:
+            label = _eps_methodology_label(methodology, earnings_trend)
+            if label is not None:
+                df['methodology'] = label
+        return df
+
+    @property
+    def earnings_estimate(self) -> pd.DataFrame:
+        return self.get_earnings_estimate()
+
+    def get_earnings_estimate(self, methodology=None) -> pd.DataFrame:
+        methodology = _validate_eps_methodology(methodology)
+        if methodology not in self._earnings_estimate:
+            self._earnings_estimate[methodology] = self._get_periodic_df('earningsEstimate', currency_key='earningsCurrency', methodology=methodology, add_methodology=True)
+        return self._earnings_estimate[methodology]
+
+    @property
+    def revenue_estimate(self) -> pd.DataFrame:
+        if self._revenue_estimate is not None:
+            return self._revenue_estimate
+        self._revenue_estimate = self._get_periodic_df('revenueEstimate', currency_key='revenueCurrency')
+        return self._revenue_estimate
+
+    @property
+    def eps_trend(self) -> pd.DataFrame:
+        return self.get_eps_trend()
+
+    def get_eps_trend(self, methodology=None) -> pd.DataFrame:
+        methodology = _validate_eps_methodology(methodology)
+        if methodology not in self._eps_trend:
+            self._eps_trend[methodology] = self._get_periodic_df('epsTrend', currency_key='epsTrendCurrency', methodology=methodology, add_methodology=True)
+        return self._eps_trend[methodology]
+
+    @property
+    def eps_revisions(self) -> pd.DataFrame:
+        return self.get_eps_revisions()
+
+    def get_eps_revisions(self, methodology=None) -> pd.DataFrame:
+        methodology = _validate_eps_methodology(methodology)
+        if methodology not in self._eps_revisions:
+            self._eps_revisions[methodology] = self._get_periodic_df('epsRevisions', currency_key='epsRevisionsCurrency', methodology=methodology, add_methodology=True)
+        return self._eps_revisions[methodology]
+
+    @property
+    def analyst_price_targets(self) -> dict:
+        if self._analyst_price_targets is not None:
+            return self._analyst_price_targets
+
+        try:
+            data = self._fetch(['financialData'])
+            data = data['quoteSummary']['result'][0]['financialData']
+        except (TypeError, KeyError):
+            if not YfConfig.debug.hide_exceptions:
+                raise
+            self._analyst_price_targets = {}
+            return self._analyst_price_targets
+
+        result = {}
+        for key, value in data.items():
+            if key.startswith('target'):
+                new_key = key.replace('target', '').lower().replace('price', '').strip()
+                result[new_key] = value
+            elif key == 'currentPrice':
+                result['current'] = value
+
+        self._analyst_price_targets = result
+        return self._analyst_price_targets
+
+    @property
+    def earnings_history(self) -> pd.DataFrame:
+        return self.get_earnings_history()
+
+    def get_earnings_history(self, methodology=None) -> pd.DataFrame:
+        methodology = _validate_eps_methodology(methodology)
+        if methodology not in self._earnings_history:
+            self._earnings_history[methodology] = self._fetch_earnings_history(methodology)
+        return self._earnings_history[methodology]
+
+    def _fetch_earnings_history(self, methodology) -> pd.DataFrame:
+        module = 'earningsHistory' + _EPS_METHODOLOGY_MODULE_SUFFIX[methodology]
+        try:
+            module_data = self._fetch([module])['quoteSummary']['result'][0][module]
+            data = module_data['history']
+        except (TypeError, KeyError):
+            if not YfConfig.debug.hide_exceptions:
+                raise
+            return pd.DataFrame()
+
+        rows = []
+        for item in data:
+            row = {'quarter': item.get('quarter', {}).get('fmt', None)}
+            for k, v in item.items():
+                if k == 'quarter':
+                    continue
+                if not isinstance(v, dict) or len(v) == 0:
+                    continue
+                row[k] = v.get('raw', None)
+            rows.append(row)
+        if len(data) == 0:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows)
+        if 'quarter' in df.columns:
+            df['quarter'] = pd.to_datetime(df['quarter'], format='%Y-%m-%d')
+            df = df.set_index('quarter')
+
+        label = _eps_methodology_label(methodology, module_data)
+        if label is not None:
+            df['methodology'] = label
+        return df
+
+    @property
+    def growth_estimates(self) -> pd.DataFrame:
+        if self._growth_estimates is not None:
+            return self._growth_estimates
+
+        earnings_trend = self._fetch_earnings_trend()
+
+        try:
+            trends = self._fetch(['industryTrend', 'sectorTrend', 'indexTrend'])
+            trends = trends['quoteSummary']['result'][0]
+        except (TypeError, KeyError):
+            if not YfConfig.debug.hide_exceptions:
+                raise
+            self._growth_estimates = pd.DataFrame()
+            return self._growth_estimates
+
+        data = []
+        for item in earnings_trend.get('trend', []):
+            period = item['period']
+            row = {'period': period, 'stockTrend': item.get('growth', {}).get('raw', None)}
+            data.append(row)
+
+        for trend_name, trend_info in trends.items():
+            if trend_info.get('estimates'):
+                for estimate in trend_info['estimates']:
+                    period = estimate['period']
+                    existing_row = next((row for row in data if row['period'] == period), None)
+                    if existing_row:
+                        existing_row[trend_name] = estimate.get('growth')
+                    else:
+                        row = {'period': period, trend_name: estimate.get('growth')}
+                        data.append(row)
+        if len(data) == 0:
+            return pd.DataFrame()
+
+        self._growth_estimates = pd.DataFrame(data).set_index('period').dropna(how='all')
+        return self._growth_estimates
+
+    # modified version from quote.py
+    def _fetch(self, modules: list):
+        if not isinstance(modules, list):
+            raise YFException("Should provide a list of modules, see available modules using `valid_modules`")
+
+        modules = ','.join([m for m in modules if m in quote_summary_valid_modules])
+        if len(modules) == 0:
+            raise YFException("No valid modules provided, see available modules using `valid_modules`")
+        params_dict = {"modules": modules, "corsDomain": "finance.yahoo.com", "formatted": "false", "symbol": self._symbol}
+        try:
+            result = self._data.get_raw_json(_QUOTE_SUMMARY_URL_ + f"/{self._symbol}", params=params_dict)
+        except HTTPError as e:
+            if not YfConfig.debug.hide_exceptions:
+                raise
+            utils.get_yf_logger().error(str(e) + e.response.text)
+            return None
+        return result
+
+    def _fetch_earnings_trend(self, methodology=None) -> dict:
+        # Returns whole module: 'trend' list + 'defaultMethodology'
+        if methodology in self._earnings_trend:
+            return self._earnings_trend[methodology]
+        module = 'earningsTrend' + _EPS_METHODOLOGY_MODULE_SUFFIX[methodology]
+        try:
+            data = self._fetch([module])
+            self._earnings_trend[methodology] = data['quoteSummary']['result'][0][module]
+        except (TypeError, KeyError):
+            if not YfConfig.debug.hide_exceptions:
+                raise
+            self._earnings_trend[methodology] = {}
+        return self._earnings_trend[methodology]

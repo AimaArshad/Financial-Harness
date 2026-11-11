@@ -1,0 +1,42 @@
+{
+  "user": "demo",
+  "currency": "USD",
+  "cash": 5000.0,
+  "holdings": [
+    {
+      "symbol": "AAPL",
+      "shares": 10,
+      "avg_cost": 200.0
+    },
+    {
+      "symbol": "TSLA",
+      "shares": 5,
+      "avg_cost": 250.0
+    },
+    {
+      "symbol": "NVDA",
+      "shares": 8,
+      "avg_cost": 120.0
+    }
+  ],
+  "goals": [
+    {
+      "name": "10 Months",
+      "months": 10,
+      "note": "short-term target",
+      "target_value": 13000.0
+    },
+    {
+      "name": "20 Months",
+      "months": 20,
+      "note": "medium-term target",
+      "target_value": 15000.0
+    },
+    {
+      "name": "10 Years",
+      "months": 120,
+      "note": "long-term target",
+      "target_value": 40000.0
+    }
+  ]
+}

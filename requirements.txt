@@ -1,0 +1,7 @@
+fastmcp
+yfinance
+pandas
+anthropic
+pydantic
+streamlit>=1.50
+plotly
