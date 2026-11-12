@@ -5,3 +5,6 @@ anthropic
 pydantic
 streamlit>=1.50
 plotly
+openai
+celery
+redis

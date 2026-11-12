@@ -1,0 +1,78 @@
+name: CI-CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  AWS_REGION: ap-south-1          # change to your AWS region
+  ECR_REPOSITORY: financial-harness
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m tests.test_guardrails
+      - run: python -m tests.test_offline
+      - run: python -m tests.test_context
+      - run: python -m tests.test_dashboard
+      - name: Docker image builds
+        run: docker build -t fh-test .
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        run: |
+          IMG=${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}
+          docker build -t $IMG:${{ github.sha }} -t $IMG:latest .
+          docker push $IMG:${{ github.sha }}
+          docker push $IMG:latest
+
+      - name: Get a temporary ECR password for the server
+        id: ecrpw
+        run: |
+          PW=$(aws ecr get-login-password --region ${{ env.AWS_REGION }})
+          echo "::add-mask::$PW"
+          echo "pw=$PW" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy on EC2
+        uses: appleboy/ssh-action@v1
+        env:
+          ECR_PW: ${{ steps.ecrpw.outputs.pw }}
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ubuntu
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: ECR_PW,ECR_REGISTRY,IMAGE_TAG
+          script: |
+            set -e
+            cd ~/app
+            echo "$ECR_PW" | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+            export ECR_REGISTRY IMAGE_TAG
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d
+            docker image prune -f
+            docker compose -f docker-compose.prod.yml ps
