@@ -1,0 +1,28 @@
+# Lives on the EC2 server in ~/app/. The CI/CD pipeline sets ECR_REGISTRY and IMAGE_TAG when it deploys.
+x-app: &app
+  image: ${ECR_REGISTRY}/financial-harness:${IMAGE_TAG:-latest}
+  env_file: .env
+  environment:
+    REDIS_URL: redis://redis:6379/0
+  volumes: ["fh_logs:/app/logs"]
+  depends_on: [redis]
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  web:
+    <<: *app
+    ports: ["8501:8501"]
+
+  worker:
+    <<: *app
+    command: celery -A celery_app worker --loglevel=info --concurrency=2
+    healthcheck:
+      disable: true
+    mem_limit: 1g
+
+volumes:
+  fh_logs:
