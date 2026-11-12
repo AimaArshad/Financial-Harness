@@ -1,4 +1,183 @@
-# Financial Harness: AI Stock Market Assistant
+# Financial Harness
+
+An educational AI stock-analysis assistant. It reads market data through an MCP server, analyses a sample portfolio against goals, and answers questions in plain language. Every AI suggestion is validated and paper-tested with virtual money before it is shown. It never places real trades.
+
+**Demo only. Not financial advice.**
+
+## What's inside
+
+| Part              | What it does                                                                                  |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| `web` (Streamlit) | The dashboard and chat UI on port 8501                                                        |
+| `worker` (Celery) | Runs chat jobs in the background                                                              |
+| `redis`           | Queue between the web app and the worker                                                      |
+| MCP server        | Serves prices, candles, indicators and fundamentals (Yahoo Finance, about 15 minutes delayed) |
+
+### The engines
+
+- **Rule-based sample:** moving-average rules. No API key needed. Always works.
+- **AI agent, direct tool calls:** the model calls data tools one by one.
+- **AI agent, sandbox + PTC:** the model writes one Python script that runs in an isolated sandbox and loops over all holdings.
+- **Chat:** the model answers questions and runs calculations in the sandbox, so the numbers come from code, not from the model's guesses.
+
+## Run it with Docker
+
+### 1. Install
+
+- Install **Docker Desktop** (on Windows it uses WSL2) and start it.
+- Install **Git**.
+
+### 2. Get the code
+
+```bash
+git clone https://github.com/AimaArshad/Financial-Harness.git
+cd Financial-Harness
+git checkout main
+```
+
+If the Docker files are not on `main` yet, use `git checkout feature-2` instead.
+
+### 3. Create your `.env` file
+
+Copy the template and fill in your own values:
+
+```bash
+# Windows PowerShell
+Copy-Item .env.example .env
+
+# Mac / Linux
+cp .env.example .env
+```
+
+Open `.env` and set:
+
+```
+GROQ_API_KEY=your_own_groq_key
+APP_PASSWORD=choose-a-password
+FH_MAX_AI_RUNS=20
+```
+
+Rules for this file:
+
+- Plain `KEY=value` lines. **No** quotes, **no** spaces around `=`, **no** `$env:` or `env:` prefix.
+- Get a free Groq key at https://console.groq.com. Use **your own** key. Do not share keys or paste them into chat.
+- `REDIS_URL` is set by `docker-compose.yml` for the containers. Leave it alone.
+- **Never commit `.env`.** It is in `.gitignore`. `.env.example` must contain placeholders only.
+
+### 4. Start
+
+```bash
+docker compose up --build
+```
+
+The first build takes several minutes. Later starts are fast. Wait until you see the web log say `You can now view your Streamlit app` and the worker log say `ready`.
+
+### 5. Open the app
+
+Go to http://localhost:8501 and enter the password from `APP_PASSWORD` if the app asks for one.
+
+### 6. Check that it works
+
+1. Switch on the **fake data** option if you want results that do not depend on Yahoo.
+2. Ask **one** chat question, for example: `What happens to my portfolio if TSLA drops 30%?`
+3. In a second terminal run:
+   ```bash
+   docker compose logs worker
+   ```
+   You should see `Task fh.chat[...] received` and later `succeeded in ...s`. The result should be an answer, not `{'error': ...}`.
+
+### 7. Stop
+
+Press `Ctrl+C` in the compose terminal, then:
+
+```bash
+docker compose down
+```
+
+## After you change code
+
+The code is copied into the image at build time. After any change, rebuild:
+
+```bash
+docker compose down
+docker compose up --build
+```
+
+## Suggested demo flow
+
+1. Portfolio view with charts.
+2. Rule-based sample suggestions, showing that the paper test blocks risky ones.
+3. One or two AI chat questions. Open the "Tools used" expander to show the sandbox calculation.
+4. The guard: ask `Should I buy more TSLA?` and show that it explains trade-offs and does not give an order.
+
+## Troubleshooting
+
+| Problem                                                        | Cause and fix                                                                                                                                                                                                                                  |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ports are not available ... 8501`                             | Something else uses port 8501, usually a local `streamlit run` still open. Close it (or find it with `netstat -ano \| findstr :8501` on Windows), then `docker compose down` and `docker compose up`.                                          |
+| `python-dotenv could not parse statement`                      | Your `.env` has a bad line. Use plain `KEY=value` with no quotes and no `env:` prefix. Save as UTF-8 without BOM.                                                                                                                              |
+| `GROQ_API_KEY is not set`                                      | The key is missing from `.env`. Fix it, then restart with `docker compose up`.                                                                                                                                                                 |
+| `Rate limit reached` / `429` / tokens per day                  | The free Groq quota is used up. Quotas are per organisation and per model, so a new key does not help. Wait (the message says how long), use the rule-based engine, or ask fewer questions. Do not create extra accounts to get around limits. |
+| `float() argument must be ... 'NoneType'`                      | Yahoo returned no price. Use the fake data option, or wait and retry. Cloud and shared IPs are sometimes blocked by Yahoo.                                                                                                                     |
+| Chat returns `'LoggingProxy' object has no attribute 'fileno'` | The worker needs `worker_redirect_stdouts=False` in `celery_app.py`. Make sure you are on the latest code and rebuild.                                                                                                                         |
+| Worker shows an empty `[tasks]` list                           | `celery_app.py` must contain `include=["tasks"]`. Rebuild after fixing.                                                                                                                                                                        |
+| Chat hangs                                                     | Check `docker compose logs worker` for the real error. Usually a rate limit or a missing key.                                                                                                                                                  |
+
+## Run without Docker (optional)
+
+Needs Python 3.12 and Redis running locally.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+# terminal 1: worker
+$env:REDIS_URL="redis://localhost:6379/0"; $env:GROQ_API_KEY="your_key"
+celery -A celery_app worker --loglevel=info --pool=solo
+
+# terminal 2: web app
+$env:REDIS_URL="redis://localhost:6379/0"; $env:GROQ_API_KEY="your_key"
+streamlit run app.py
+```
+
+## Tests
+
+Offline tests need no key and no internet:
+
+```bash
+python -m tests.test_guardrails
+python -m tests.test_offline
+python -m tests.test_context
+python -m tests.test_dashboard
+```
+
+Chat tests call the AI and use quota. By default only the two cheap fake-data tests run:
+
+```bash
+python -m tests.test_chat          # tests 1 and 2
+python -m tests.test_chat 3        # one specific test
+python -m tests.test_chat all      # everything, uses a lot of quota
+```
+
+Each AI question uses several model calls. Run them sparingly.
+
+## Safety rules
+
+- No real trading path exists. Real-mode orders are refused.
+- Every suggestion is schema-validated and paper-tested. Anything that breaks the risk limits is blocked.
+- AI runs are capped by `FH_MAX_AI_RUNS` per server process, so a shared link cannot drain the API quota.
+- Every action is written to an audit log.
+- Secrets live in `.env` only. Never commit keys.
+
+## Known limits
+
+- Market data comes from Yahoo Finance and is delayed. A licensed feed would be the production choice, and only the MCP server file would change.
+- The free Groq tier has daily and per-minute limits.
+- The app serves plain HTTP with a shared password. Add HTTPS and real user accounts before any real use.
+- Educational analysis only, not financial advice.
+
+## Financial Harness: AI Stock Market Assistant
 
 An AI portfolio manager that brings market data, company research and analysis into one conversational interface.
 A "harness" coordinates the model, its context, its permissions and its tools. The model never touches money and
