@@ -1,9 +1,0 @@
-__pycache__/
-*.pyc
-.env
-.venv/
-agent_log.jsonl
-suggestions.json 
-logs/
-suggestions.json
-
